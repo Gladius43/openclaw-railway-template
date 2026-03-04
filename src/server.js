@@ -25,6 +25,30 @@ function debug(...args) {
   if (DEBUG) console.log(...args);
 }
 
+// Sync gateway.controlUi.allowedOrigins so the Control UI can load from the
+// public Railway domain without "origin not allowed" errors.
+async function syncAllowedOrigins() {
+  const publicDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+  if (!publicDomain) return;
+
+  const origin = `https://${publicDomain}`;
+  const result = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      "gateway.controlUi.allowedOrigins",
+      JSON.stringify([origin]),
+    ]),
+  );
+  if (result.code === 0) {
+    console.log(`[gateway] set allowedOrigins to [${origin}]`);
+  } else {
+    console.warn(`[gateway] failed to set allowedOrigins (exit=${result.code})`);
+  }
+}
+
 // Gateway admin token (protects Openclaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
 function resolveGatewayToken() {
@@ -251,6 +275,7 @@ async function ensureGatewayRunning() {
   if (gatewayProc) return { ok: true };
   if (!gatewayStarting) {
     gatewayStarting = (async () => {
+      await syncAllowedOrigins();
       await startGateway();
       const ready = await waitForGatewayReady({ timeoutMs: 60_000 });
       if (!ready) {
@@ -1327,14 +1352,20 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
+// Determine the origin the gateway expects: the public-facing URL when deployed,
+// falling back to the internal target for local dev.
+const PROXY_ORIGIN = process.env.RAILWAY_PUBLIC_DOMAIN
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : GATEWAY_TARGET;
+
 proxy.on("proxyReq", (proxyReq, req, res) => {
   proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
-  proxyReq.setHeader("Origin", GATEWAY_TARGET);
+  proxyReq.setHeader("Origin", PROXY_ORIGIN);
 });
 
 proxy.on("proxyReqWs", (proxyReq, req, socket, options, head) => {
   proxyReq.setHeader("Authorization", `Bearer ${OPENCLAW_GATEWAY_TOKEN}`);
-  proxyReq.setHeader("Origin", GATEWAY_TARGET);
+  proxyReq.setHeader("Origin", PROXY_ORIGIN);
 });
 
 // Auto-inject token into /openclaw browser GET requests so the Control UI works
@@ -1464,7 +1495,7 @@ server.on("upgrade", async (req, socket, head) => {
     target: GATEWAY_TARGET,
     headers: {
       Authorization: `Bearer ${OPENCLAW_GATEWAY_TOKEN}`,
-      Origin: GATEWAY_TARGET,
+      Origin: PROXY_ORIGIN,
     },
   });
 });
